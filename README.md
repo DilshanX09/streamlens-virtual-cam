@@ -69,7 +69,7 @@ StreamLens follows a rigorous, production-grade **multithreaded architectural pa
 ### 1. Clone & Initialize
 
 ```bash
-git clone https://github.com/your-username/stream-lens.git
+git clone https://github.com/DilshanX09/streamlens-virtual-cam
 cd stream-lens
 ```
 
