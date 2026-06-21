@@ -1,511 +1,919 @@
+"""
+StreamLens – Premium Light Theme UI
+ui_main.py
+
+Matches the high-fidelity reference designs exactly with Custom SVG Assets.
+Includes robust fallback mechanisms for missing icons and perfect aspect ratio scaling.
+"""
+
 import sys
+import os
+
+# Dynamically add the project root directory to sys.path to resolve 'src' imports
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import numpy as np
-import cv2
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QSlider, QCheckBox, QComboBox, QGroupBox, 
-    QFormLayout, QScrollArea, QGraphicsDropShadowEffect, QFrame, QApplication
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSlider,
+    QFrame,
+    QApplication,
+    QAbstractButton,
+    QGraphicsDropShadowEffect,
+    QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QPoint, pyqtSlot, QSize
-from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QMouseEvent
+from PyQt6.QtCore import (
+    Qt,
+    QPoint,
+    QSize,
+    QRect,
+    QPropertyAnimation,
+    pyqtProperty,
+    QEasingCurve,
+    pyqtSignal,
+    pyqtSlot,
+)
+from PyQt6.QtGui import (
+    QImage,
+    QPixmap,
+    QColor,
+    QFont,
+    QPainter,
+    QBrush,
+    QPen,
+    QFontDatabase,
+    QPainterPath,
+    QIcon,
+)
 
-from src.state_manager import StateManager
-from src.camera_engine import CameraEngine
+try:
+    from pygrabber.dshow_graph import FilterGraph
+except ImportError:
+    FilterGraph = None
 
-class CustomTitleBar(QWidget):
-    """Custom frameless window title bar supporting dragging and window control."""
+
+def get_asset(name: str) -> str:
+    """Resolve asset path reliably relative to project root."""
+    base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, "assets", name)
+
+
+# ---------------------------------------------------------------------------
+# Font family – dynamically retrieved from the native system default
+# ---------------------------------------------------------------------------
+_FONT_FAMILY = "Gelion"
+
+
+# ---------------------------------------------------------------------------
+# Design tokens
+# ---------------------------------------------------------------------------
+CLR_BG = "#FFFFFF"
+CLR_WHITE = "#FFFFFF"
+CLR_GRAY_BG = "#FBFBFB"
+CLR_PANEL_BG = "#FFFFFF"
+CLR_BORDER = "#EBEBEB"
+CLR_TEXT_DARK = "#151515"
+CLR_TEXT_MED = "#6B7280"
+CLR_TEXT_LIGHT = "#9CA3AF"
+CLR_PLACEHOLDER = "#E5E7EB"
+CLR_TOGGLE_ON = "#151515"
+CLR_TOGGLE_OFF = "#D1D5DB"
+CLR_SLIDER_GRV = "#E5E7EB"
+CLR_SLIDER_HDL = "#151515"
+CLR_ACTIVE_INDICATOR = "#151515"
+
+
+# ===========================================================================
+# ModernToggle – animated iOS pill toggle
+# ===========================================================================
+class ModernToggle(QAbstractButton):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
-        self.setFixedHeight(40)
-        
-        # Main layout
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(15, 0, 10, 0)
-        layout.setSpacing(10)
-        
-        # Logo and Title
-        self.title_label = QLabel("StreamLens - Virtual Camera")
-        self.title_label.setStyleSheet("color: #E2E8F0; font-weight: bold; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px;")
-        layout.addWidget(self.title_label)
-        
-        layout.addStretch()
-        
-        # Minimize Button
-        self.btn_minimize = QPushButton("—")
-        self.btn_minimize.setFixedSize(28, 28)
-        self.btn_minimize.setStyleSheet(self._button_style("#4A5568", "#2D3748"))
-        self.btn_minimize.clicked.connect(self.parent.showMinimized)
-        layout.addWidget(self.btn_minimize)
-        
-        # Close Button
-        self.btn_close = QPushButton("✕")
-        self.btn_close.setFixedSize(28, 28)
-        self.btn_close.setStyleSheet(self._button_style("#E53E3E", "#C53030"))
-        self.btn_close.clicked.connect(self.parent.close)
-        layout.addWidget(self.btn_close)
-        
-        # Dragging variables
-        self.drag_position = QPoint()
+        self.setCheckable(True)
+        self.setFixedSize(48, 26)
+        self._thumb_x: float = 3.0
 
-    def _button_style(self, hover_color, press_color):
-        return f"""
-            QPushButton {{
-                background-color: transparent;
-                border: none;
-                border-radius: 4px;
-                color: #A0AEC0;
-                font-family: Arial, sans-serif;
-                font-size: 11px;
-                font-weight: bold;
+        self._anim = QPropertyAnimation(self, b"thumb_x", self)
+        self._anim.setDuration(180)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+    @pyqtProperty(float)
+    def thumb_x(self):
+        return self._thumb_x
+
+    @thumb_x.setter
+    def thumb_x(self, v: float):
+        self._thumb_x = v
+        self.update()
+
+    def _thumb_end(self) -> float:
+        return self.width() - self.height() + 3.0
+
+    def hitButton(self, pos: QPoint) -> bool:
+        return self.contentsRect().contains(pos)
+
+    def nextCheckState(self):
+        super().nextCheckState()
+        start = self._thumb_x
+        end = self._thumb_end() if self.isChecked() else 3.0
+        self._anim.stop()
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(end)
+        self._anim.start()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        r = self.height() / 2
+        track_color = QColor(CLR_TOGGLE_ON if self.isChecked() else CLR_TOGGLE_OFF)
+        p.setBrush(QBrush(track_color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(0, 0, self.width(), self.height(), r, r)
+
+        thumb_d = self.height() - 6
+        p.setBrush(QBrush(QColor(CLR_WHITE)))
+        p.drawEllipse(int(self._thumb_x), 3, thumb_d, thumb_d)
+        p.end()
+
+
+# ===========================================================================
+# FloatingPanel – white rounded card with drop shadow
+# ===========================================================================
+class FloatingPanel(QFrame):
+    def __init__(self, parent=None, title: str = "", width: int = 290):
+        super().__init__(parent)
+        self.setObjectName("FloatingPanel")
+        self.setFixedWidth(width)
+
+        self.setStyleSheet(f"""
+            QFrame#FloatingPanel {{
+                background-color: {CLR_PANEL_BG};
+                border-radius: 18px;
+                border: 1px solid {CLR_BORDER};
             }}
-            QPushButton:hover {{
-                background-color: {hover_color};
-                color: white;
-            }}
-            QPushButton:pressed {{
-                background-color: {press_color};
-            }}
-        """
+        """)
 
-    def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_position = event.globalPosition().toPoint() - self.parent.frameGeometry().topLeft()
-            event.accept()
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setBlurRadius(32)
+        self._shadow.setColor(QColor(0, 0, 0, 28))
+        self._shadow.setOffset(0, 8)
+        self.setGraphicsEffect(self._shadow)
 
-    def mouseMoveEvent(self, event: QMouseEvent):
-        if event.buttons() == Qt.MouseButton.LeftButton:
-            self.parent.move(event.globalPosition().toPoint() - self.drag_position)
-            event.accept()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 18, 22, 20)
+        outer.setSpacing(14)
+
+        if title:
+            hdr = QLabel(title)
+            hdr.setStyleSheet(f"""
+                color: {CLR_TEXT_MED};
+                font-family: '{_FONT_FAMILY}';
+                font-size: 12px;
+                font-weight: 500;
+                letter-spacing: 0.3px;
+            """)
+            outer.addWidget(hdr)
+
+        self.body_layout = outer
+        self.hide()
+
+    def sizeHint(self) -> QSize:
+        return self.layout().sizeHint()
 
 
+# ===========================================================================
+# Helper builders
+# ===========================================================================
+def _label(
+    text: str, size: int = 13, weight: int = 500, color: str = CLR_TEXT_DARK
+) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(
+        f"color: {color}; font-family: '{_FONT_FAMILY}'; "
+        f"font-size: {size}px; font-weight: {weight}; background: transparent;"
+    )
+    return lbl
+
+
+def _divider() -> QFrame:
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setFixedHeight(1)
+    line.setStyleSheet(f"background: {CLR_BORDER}; border: none;")
+    return line
+
+
+def _add_shadow(widget, blur=18, dy=5, alpha=22):
+    sh = QGraphicsDropShadowEffect(widget)
+    sh.setBlurRadius(blur)
+    sh.setColor(QColor(0, 0, 0, alpha))
+    sh.setOffset(0, dy)
+    widget.setGraphicsEffect(sh)
+
+
+# ===========================================================================
+# StreamLensUI – main window
+# ===========================================================================
 class StreamLensUI(QMainWindow):
-    def __init__(self, state_manager: StateManager):
+    settings_changed = pyqtSignal(str, object)  # Emit setting key and new value thread-safely
+
+    def __init__(self, state_manager=None):
         super().__init__()
         self.state_manager = state_manager
-        self.settings = state_manager.settings
+        self.settings = state_manager.settings if state_manager else _FallbackSettings()
         self.engine = None
-        
-        # Setup window behavior
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowSystemMenuHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
-        # Window size
-        self.resize(1100, 720)
-        self.setMinimumSize(950, 600)
-        
-        # Central widget and layout
-        self.central_widget = QWidget(self)
-        self.central_widget.setObjectName("CentralWidget")
-        self.setCentralWidget(self.central_widget)
-        
-        # Stylized wrapper to achieve rounded corners and drop shadow
-        self.central_layout = QVBoxLayout(self.central_widget)
-        self.central_layout.setContentsMargins(10, 10, 10, 10)
-        
-        self.main_container = QWidget(self.central_widget)
-        self.main_container.setObjectName("MainContainer")
-        self.main_container.setStyleSheet("""
-            QWidget#MainContainer {
-                background-color: #1A202C;
-                border: 1px solid #2D3748;
-                border-radius: 12px;
-            }
+        self._cam_active = False
+
+        app_font = QFont(_FONT_FAMILY, 10)
+        QApplication.setFont(app_font)
+
+        self.setWindowTitle("Stream Lens")
+        self._apply_native_light_titlebar()
+        self.resize(900, 480)
+        self.setMinimumSize(600, 420)
+
+        # Apply global double lock stylesheet to ensure fonts propagate to all child widgets
+        self.setStyleSheet(f"""
+            * {{
+                font-family: '{_FONT_FAMILY}';
+            }}
         """)
-        
-        # Add drop shadow to main container
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(15)
-        shadow.setColor(QColor(0, 0, 0, 150))
-        shadow.setOffset(0, 4)
-        self.main_container.setGraphicsEffect(shadow)
-        
-        self.central_layout.addWidget(self.main_container)
-        
-        # Inner layout of main container
-        self.container_layout = QVBoxLayout(self.main_container)
-        self.container_layout.setContentsMargins(0, 0, 0, 0)
-        self.container_layout.setSpacing(0)
-        
-        # Add Custom Title Bar
-        self.title_bar = CustomTitleBar(self)
-        self.container_layout.addWidget(self.title_bar)
-        
-        # Content Layout (Preview + Sidebar)
-        self.content_widget = QWidget(self.main_container)
-        self.content_layout = QHBoxLayout(self.content_widget)
-        self.content_layout.setContentsMargins(15, 10, 15, 15)
-        self.content_layout.setSpacing(15)
-        self.container_layout.addWidget(self.content_widget)
-        
-        # 1. Preview Layout (Left)
-        self.preview_container = QFrame()
-        self.preview_container.setStyleSheet("""
-            QFrame {
-                background-color: #0F172A;
-                border: 2px solid #2D3748;
-                border-radius: 8px;
-            }
+
+        self.central = QWidget()
+        self.setCentralWidget(self.central)
+        self.central.setStyleSheet(f"background: {CLR_BG};")
+
+        self.video_label = QLabel(self.central)
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setStyleSheet(f"background: {CLR_BG};")
+
+        # We DO NOT use setScaledContents(True) here to prevent aspect ratio stretching
+
+        self._build_floating_panels()
+        self._build_bottom_bar()
+
+        # Delay drawing placeholder until layout is initialized to get proper size
+        self._draw_placeholder()
+
+        self.panel_camera.raise_()
+        self.panel_transform.raise_()
+        self.panel_color.raise_()
+        self.bottom_bar.raise_()
+
+    def _apply_native_light_titlebar(self):
+        """Uses Windows API via ctypes to force the title bar to light mode."""
+        if sys.platform != "win32":
+            return
+
+        try:
+            import ctypes
+            from ctypes.wintypes import HWND, DWORD
+
+            # Windows 11 / Windows 10 (Build 17763+) DWMWA_USE_IMMERSIVE_DARK_MODE constant
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            # For older Windows 10 versions, the constant is 19
+            # DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19
+
+            # Value to set: 0 = Light Mode, 1 = Dark Mode
+            set_theme_value = ctypes.c_int(0)
+
+            hwnd = HWND(int(self.winId()))
+
+            # Call DwmSetWindowAttribute
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                DWORD(DWMWA_USE_IMMERSIVE_DARK_MODE),
+                ctypes.byref(set_theme_value),
+                ctypes.sizeof(set_theme_value),
+            )
+        except Exception as e:
+            print(f"[StreamLens] Failed to set native title bar theme: {e}")
+
+    def _draw_placeholder(self):
+        """Load and display the user placeholder SVG/PNG asset with correct aspect ratio and spacing."""
+        placeholder = get_asset("user_placeholder_light.jpg")
+
+        if placeholder and os.path.exists(placeholder):
+            # Fallback size if window hasn't properly resized yet
+            label_w = (
+                self.video_label.width() if self.video_label.width() > 100 else 900
+            )
+            label_h = (
+                self.video_label.height() if self.video_label.height() > 100 else 480
+            )
+
+            # --- Spacing (Padding) Logic ---
+            # 0.7 kiyanne full size eken 70% k witharak image eka gannawa kiyana eka.
+            # Meka 0.5 (50%) hari 0.8 (80%) hari kalala oyata ona widiyata spacing eka wenas karaganna puluwan.
+            padding_factor = 0.5
+            target_w = int(label_w * padding_factor)
+            target_h = int(label_h * padding_factor)
+
+            pixmap = QPixmap(placeholder)
+            scaled_pixmap = pixmap.scaled(
+                target_w,
+                target_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.video_label.setPixmap(scaled_pixmap)
+        else:
+            self.video_label.setText("Placeholder SVG/PNG not found in assets")
+
+    def _build_floating_panels(self):
+        # ---- Camera Devices ------------------------------------------------
+        self.panel_camera = FloatingPanel(self.central, "Camera Devices", width=280)
+
+        active_row = QWidget()
+        active_row.setStyleSheet("background: transparent;")
+        ar_layout = QHBoxLayout(active_row)
+        ar_layout.setContentsMargins(0, 4, 0, 4)
+        ar_layout.setSpacing(10)
+
+        indicator = QFrame()
+        indicator.setFixedSize(3, 20)
+        indicator.setStyleSheet(
+            f"background: {CLR_ACTIVE_INDICATOR}; border-radius: 2px;"
+        )
+
+        self.lbl_active_cam = _label("WSC 1.0 Built-in Camera", 13, 600, CLR_TEXT_DARK)
+        ar_layout.addWidget(indicator)
+        ar_layout.addWidget(self.lbl_active_cam, 1)
+        self.panel_camera.body_layout.addWidget(active_row)
+        self.panel_camera.body_layout.addWidget(_divider())
+
+        # Dynamic layout for camera buttons instead of QComboBox
+        self.cam_list_layout = QVBoxLayout()
+        self.cam_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.cam_list_layout.setSpacing(4)
+        self.panel_camera.body_layout.addLayout(self.cam_list_layout)
+
+        self._populate_cameras()
+
+        # ---- Transformations -----------------------------------------------
+        self.panel_transform = FloatingPanel(self.central, "Transformations", width=280)
+        self._toggle_flip_h = self._add_toggle_row(
+            self.panel_transform,
+            "Flip Horizontal",
+            self.settings.flip_horizontal,
+            self._on_flip_h_changed,
+        )
+        self.panel_transform.body_layout.addWidget(_divider())
+        self._toggle_flip_v = self._add_toggle_row(
+            self.panel_transform,
+            "Flip Vertical",
+            self.settings.flip_vertical,
+            self._on_flip_v_changed,
+        )
+
+        # ---- Color Settings ------------------------------------------------
+        self.panel_color = FloatingPanel(self.central, "Color Settings", width=310)
+
+        icons = {
+            "Brightness": "brightness.svg",
+            "Contrast": "contrast.svg",
+            "Saturation": "saturation.svg",
+        }
+        defaults = {
+            "Brightness": self.settings.brightness,
+            "Contrast": self.settings.contrast,
+            "Saturation": self.settings.saturation,
+        }
+        callbacks = {
+            "Brightness": self._on_brightness_changed,
+            "Contrast": self._on_contrast_changed,
+            "Saturation": self._on_saturation_changed,
+        }
+
+        self._sliders = {}
+        for i, name in enumerate(["Brightness", "Contrast", "Saturation"]):
+            if i > 0:
+                self.panel_color.body_layout.addWidget(_divider())
+            self._sliders[name] = self._add_slider_row(
+                self.panel_color,
+                name,
+                icons[name],
+                -100,
+                100,
+                defaults[name],
+                callbacks[name],
+            )
+
+    def _add_toggle_row(
+        self, panel: FloatingPanel, label: str, checked: bool, callback
+    ) -> ModernToggle:
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 6, 0, 6)
+        rl.setSpacing(12)
+
+        lbl = _label(label, 13, 500, CLR_TEXT_DARK)
+        toggle = ModernToggle()
+        toggle.setChecked(checked)
+        toggle.clicked.connect(callback)
+
+        rl.addWidget(lbl, 1)
+        rl.addWidget(toggle)
+        panel.body_layout.addWidget(row)
+        return toggle
+
+    def _add_slider_row(
+        self,
+        panel: FloatingPanel,
+        label: str,
+        icon_file: str,
+        min_v: int,
+        max_v: int,
+        curr_v: int,
+        callback,
+    ) -> QSlider:
+        panel.body_layout.addWidget(_label(label, 13, 600, CLR_TEXT_DARK))
+
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 2, 0, 6)
+        rl.setSpacing(10)
+
+        icon_lbl = QLabel()
+        icon_lbl.setFixedWidth(20)
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        svg_path = get_asset(icon_file)
+        if os.path.exists(svg_path):
+            pixmap = QIcon(svg_path).pixmap(QSize(16, 16))
+            icon_lbl.setPixmap(pixmap)
+        else:
+            icon_lbl.setText("?")
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(min_v, max_v)
+        slider.setValue(curr_v)
+        slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{ height: 4px; background: {CLR_SLIDER_GRV}; border-radius: 2px; }}
+            QSlider::sub-page:horizontal {{ background: {CLR_TEXT_DARK}; border-radius: 2px; }}
+            QSlider::handle:horizontal {{ background: {CLR_SLIDER_HDL}; width: 20px; height: 20px; margin: -8px 0; border-radius: 10px; }}
         """)
-        self.preview_layout = QVBoxLayout(self.preview_container)
-        self.preview_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.preview_label = QLabel("Camera Stream Inactive")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setStyleSheet("color: #718096; font-size: 16px; font-family: 'Segoe UI', sans-serif;")
-        self.preview_layout.addWidget(self.preview_label)
-        self.content_layout.addWidget(self.preview_container, stretch=3)
-        
-        # 2. Sidebar Layout (Right)
-        self.sidebar_scroll = QScrollArea()
-        self.sidebar_scroll.setWidgetResizable(True)
-        self.sidebar_scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: #2D3748;
-                width: 8px;
-                margin: 0px 0px 0px 0px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical {
-                background: #4A5568;
-                min-height: 20px;
-                border-radius: 4px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                border: none;
-                background: none;
-            }
+        slider.valueChanged.connect(callback)
+
+        val_lbl = _label(str(curr_v), 13, 700, CLR_TEXT_DARK)
+        val_lbl.setFixedWidth(30)
+        val_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        slider.valueChanged.connect(lambda v, l=val_lbl: l.setText(str(v)))
+
+        rl.addWidget(icon_lbl)
+        rl.addWidget(slider, 1)
+        rl.addWidget(val_lbl)
+        panel.body_layout.addWidget(row)
+        return slider
+
+    def _build_bottom_bar(self):
+        self.bottom_bar = QWidget(self.central)
+        self.bottom_bar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.bottom_bar.setFixedHeight(96)
+
+        layout = QHBoxLayout(self.bottom_bar)
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setSpacing(0)
+
+        # ── Left: camera pill ──────────────────────
+        self.cam_pill = QFrame()
+        self.cam_pill.setObjectName("CamPill")
+        self.cam_pill.setFixedHeight(52)
+        self.cam_pill.setStyleSheet(f"""
+            QFrame#CamPill {{
+                background: {CLR_GRAY_BG};
+                border-radius: 26px;
+                border: 1px solid {CLR_BORDER};
+            }}
         """)
-        
-        self.sidebar_widget = QWidget()
-        self.sidebar_widget.setObjectName("Sidebar")
-        self.sidebar_widget.setStyleSheet("""
-            QWidget#Sidebar {
-                background-color: #1A202C;
-            }
-            QGroupBox {
-                border: 1px solid #2D3748;
-                border-radius: 8px;
-                margin-top: 15px;
-                font-weight: bold;
-                font-size: 12px;
-                color: #CBD5E0;
-                font-family: 'Segoe UI', Arial, sans-serif;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-            QLabel {
-                color: #A0AEC0;
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 11px;
-            }
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #2D3748;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #3182CE;
-                width: 14px;
-                margin-top: -5px;
-                margin-bottom: -5px;
-                border-radius: 7px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #4299E1;
-            }
-            QCheckBox {
-                color: #A0AEC0;
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 11px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid #4A5568;
-                background-color: #2D3748;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #3182CE;
-                border-color: #3182CE;
-            }
-            QComboBox {
-                background-color: #2D3748;
-                border: 1px solid #4A5568;
-                border-radius: 4px;
-                padding: 5px;
-                color: #E2E8F0;
-                font-family: 'Segoe UI', Arial, sans-serif;
-            }
-            QComboBox::drop-down {
-                border: none;
-            }
-            QPushButton#ActionBtn {
-                background-color: #3182CE;
-                color: white;
-                font-weight: bold;
-                border: none;
-                border-radius: 6px;
-                padding: 10px;
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 12px;
-            }
-            QPushButton#ActionBtn:hover {
-                background-color: #4299E1;
-            }
-            QPushButton#ActionBtn:pressed {
-                background-color: #2B6CB0;
-            }
-            QPushButton#DangerBtn {
-                background-color: #E53E3E;
-                color: white;
-                font-weight: bold;
-                border: none;
-                border-radius: 6px;
-                padding: 10px;
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 12px;
-            }
-            QPushButton#DangerBtn:hover {
-                background-color: #FC8181;
-            }
-            QPushButton#DangerBtn:pressed {
-                background-color: #C53030;
-            }
+        _add_shadow(self.cam_pill, blur=20, dy=6, alpha=20)
+
+        cam_pill_l = QHBoxLayout(self.cam_pill)
+        cam_pill_l.setContentsMargins(6, 6, 10, 6)
+        cam_pill_l.setSpacing(0)
+
+        self.btn_cam = QPushButton()
+        self.btn_cam.setFixedSize(40, 40)
+        self.btn_cam.setStyleSheet(self._circle_btn_style(40))
+
+        video_off_icon = QIcon(get_asset("video_off.svg"))
+        if not video_off_icon.isNull():
+            self.btn_cam.setIcon(video_off_icon)
+            self.btn_cam.setIconSize(QSize(22, 22))
+        else:
+            self.btn_cam.setText("📷")
+
+        self.btn_cam.clicked.connect(self._toggle_stream)
+
+        sep = QFrame()
+        sep.setFixedSize(1, 22)
+        sep.setStyleSheet(f"background: {CLR_BORDER}; border: none;")
+
+        self.btn_cam_dropdown = QPushButton()
+        self.btn_cam_dropdown.setFixedSize(28, 40)
+        self.btn_cam_dropdown.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; color: {CLR_TEXT_DARK}; font-size: 16px; }}
+            QPushButton:hover {{ background: #F3F4F6; border-radius: 14px; }}
         """)
-        
-        self.sidebar_layout = QVBoxLayout(self.sidebar_widget)
-        self.sidebar_layout.setContentsMargins(0, 0, 5, 0)
-        self.sidebar_layout.setSpacing(15)
-        
-        # 2a. Group: Device Settings
-        self.gp_device = QGroupBox("Camera Device")
-        self.gp_device_layout = QFormLayout(self.gp_device)
-        self.gp_device_layout.setContentsMargins(10, 20, 10, 10)
-        
-        self.cb_camera = QComboBox()
-        self._populate_camera_list()
-        self.cb_camera.currentIndexChanged.connect(self._on_camera_changed)
-        self.gp_device_layout.addRow(QLabel("Camera Device:"), self.cb_camera)
-        
-        self.sidebar_layout.addWidget(self.gp_device)
-        
-        # 2b. Group: Transformations
-        self.gp_transform = QGroupBox("Transformations")
-        self.gp_transform_layout = QVBoxLayout(self.gp_transform)
-        self.gp_transform_layout.setContentsMargins(10, 20, 10, 10)
-        self.gp_transform_layout.setSpacing(12)
-        
-        self.chk_flip_h = QCheckBox("Flip Horizontal (Mirror)")
-        self.chk_flip_h.setChecked(self.settings.flip_horizontal)
-        self.chk_flip_h.stateChanged.connect(self._on_flip_h_changed)
-        self.gp_transform_layout.addWidget(self.chk_flip_h)
-        
-        self.chk_flip_v = QCheckBox("Flip Vertical")
-        self.chk_flip_v.setChecked(self.settings.flip_vertical)
-        self.chk_flip_v.stateChanged.connect(self._on_flip_v_changed)
-        self.gp_transform_layout.addWidget(self.chk_flip_v)
-        
-        # Zoom Slider
-        zoom_hbox = QHBoxLayout()
-        self.lbl_zoom_val = QLabel(f"{self.settings.zoom_level:.1f}x")
-        self.lbl_zoom_val.setFixedWidth(30)
-        self.slider_zoom = QSlider(Qt.Orientation.Horizontal)
-        self.slider_zoom.setMinimum(10) # 1.0x
-        self.slider_zoom.setMaximum(30) # 3.0x
-        self.slider_zoom.setValue(int(self.settings.zoom_level * 10))
-        self.slider_zoom.valueChanged.connect(self._on_zoom_changed)
-        zoom_hbox.addWidget(self.slider_zoom)
-        zoom_hbox.addWidget(self.lbl_zoom_val)
-        
-        self.gp_transform_layout.addWidget(QLabel("Zoom Level:"))
-        self.gp_transform_layout.addLayout(zoom_hbox)
-        
-        self.sidebar_layout.addWidget(self.gp_transform)
-        
-        # 2c. Group: Color Adjustments
-        self.gp_color = QGroupBox("Color Adjustments")
-        self.gp_color_layout = QVBoxLayout(self.gp_color)
-        self.gp_color_layout.setContentsMargins(10, 20, 10, 10)
-        self.gp_color_layout.setSpacing(12)
-        
-        # Brightness Slider
-        bright_hbox = QHBoxLayout()
-        self.lbl_bright_val = QLabel(str(self.settings.brightness))
-        self.lbl_bright_val.setFixedWidth(30)
-        self.slider_bright = QSlider(Qt.Orientation.Horizontal)
-        self.slider_bright.setMinimum(-100)
-        self.slider_bright.setMaximum(100)
-        self.slider_bright.setValue(self.settings.brightness)
-        self.slider_bright.valueChanged.connect(self._on_brightness_changed)
-        bright_hbox.addWidget(self.slider_bright)
-        bright_hbox.addWidget(self.lbl_bright_val)
-        self.gp_color_layout.addWidget(QLabel("Brightness:"))
-        self.gp_color_layout.addLayout(bright_hbox)
-        
-        # Contrast Slider
-        contrast_hbox = QHBoxLayout()
-        self.lbl_contrast_val = QLabel(str(self.settings.contrast))
-        self.lbl_contrast_val.setFixedWidth(30)
-        self.slider_contrast = QSlider(Qt.Orientation.Horizontal)
-        self.slider_contrast.setMinimum(-100)
-        self.slider_contrast.setMaximum(100)
-        self.slider_contrast.setValue(self.settings.contrast)
-        self.slider_contrast.valueChanged.connect(self._on_contrast_changed)
-        contrast_hbox.addWidget(self.slider_contrast)
-        contrast_hbox.addWidget(self.lbl_contrast_val)
-        self.gp_color_layout.addWidget(QLabel("Contrast:"))
-        self.gp_color_layout.addLayout(contrast_hbox)
-        
-        # Saturation Slider
-        sat_hbox = QHBoxLayout()
-        self.lbl_sat_val = QLabel(str(self.settings.saturation))
-        self.lbl_sat_val.setFixedWidth(30)
-        self.slider_sat = QSlider(Qt.Orientation.Horizontal)
-        self.slider_sat.setMinimum(-100)
-        self.slider_sat.setMaximum(100)
-        self.slider_sat.setValue(self.settings.saturation)
-        self.slider_sat.valueChanged.connect(self._on_saturation_changed)
-        sat_hbox.addWidget(self.slider_sat)
-        sat_hbox.addWidget(self.lbl_sat_val)
-        self.gp_color_layout.addWidget(QLabel("Saturation (Hue/Sat):"))
-        self.gp_color_layout.addLayout(sat_hbox)
-        
-        self.sidebar_layout.addWidget(self.gp_color)
-        
-        # Action Buttons
-        self.btn_toggle_stream = QPushButton("Start Virtual Camera")
-        self.btn_toggle_stream.setObjectName("ActionBtn")
-        self.btn_toggle_stream.clicked.connect(self._toggle_stream)
-        self.sidebar_layout.addWidget(self.btn_toggle_stream)
-        
-        # Reset Defaults Button
-        self.btn_reset = QPushButton("Reset Controls")
-        self.btn_reset.setObjectName("DangerBtn")
-        self.btn_reset.clicked.connect(self._reset_controls)
-        self.sidebar_layout.addWidget(self.btn_reset)
-        
-        self.sidebar_layout.addStretch()
-        
-        self.sidebar_scroll.setWidget(self.sidebar_widget)
-        self.content_layout.addWidget(self.sidebar_scroll, stretch=1)
 
-    def _populate_camera_list(self):
-        # High quality auto discovery of camera indexes on Windows
-        # Add a couple indexes. Standard webcam is usually 0.
-        for i in range(4):
-            self.cb_camera.addItem(f"Camera Device {i}", i)
-        
-        # Select matching camera index
-        idx = self.cb_camera.findData(self.settings.camera_index)
-        if idx != -1:
-            self.cb_camera.setCurrentIndex(idx)
+        arrow_icon = QIcon(get_asset("down_arrow.jpg"))
+        if arrow_icon.isNull():
+            self.btn_cam_dropdown.setText("▾")
+        else:
+            self.btn_cam_dropdown.setIcon(arrow_icon)
+            self.btn_cam_dropdown.setIconSize(QSize(20, 20))
 
-    # UI Slots
-    def _on_camera_changed(self, index):
-        cam_idx = self.cb_camera.currentData()
-        if cam_idx is not None:
-            self.state_manager.update_setting("camera_index", cam_idx)
-            # Re-initialize camera engine if running
-            if self.engine and self.engine.isRunning():
-                self._stop_engine()
-                self._start_engine()
+        self.btn_cam_dropdown.clicked.connect(
+            lambda: self._toggle_panel(self.panel_camera)
+        )
 
-    def _on_flip_h_changed(self, state):
-        val = state == Qt.CheckState.Checked.value or state == 2
-        self.state_manager.update_setting("flip_horizontal", val)
+        cam_pill_l.addWidget(self.btn_cam)
+        cam_pill_l.addSpacing(4)
+        cam_pill_l.addWidget(sep)
+        cam_pill_l.addWidget(self.btn_cam_dropdown)
 
-    def _on_flip_v_changed(self, state):
-        val = state == Qt.CheckState.Checked.value or state == 2
-        self.state_manager.update_setting("flip_vertical", val)
+        layout.addWidget(self.cam_pill, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addStretch()
 
-    def _on_zoom_changed(self, value):
-        zoom_val = value / 10.0
-        self.lbl_zoom_val.setText(f"{zoom_val:.1f}x")
-        self.state_manager.update_setting("zoom_level", zoom_val)
+        # ── Centre: transform + color buttons ──────────────────────────────
+        centre_row = QHBoxLayout()
+        centre_row.setSpacing(14)
 
-    def _on_brightness_changed(self, value):
-        self.lbl_bright_val.setText(str(value))
-        self.state_manager.update_setting("brightness", value)
+        # Passing fallback text symbols in case SVGs are missing
+        self.btn_transform = self._make_icon_btn(
+            "transform.jpg", "⛶", self.panel_transform
+        )
+        self.btn_color = self._make_icon_btn("color.jpg", "⊛", self.panel_color)
 
-    def _on_contrast_changed(self, value):
-        self.lbl_contrast_val.setText(str(value))
-        self.state_manager.update_setting("contrast", value)
+        centre_row.addWidget(self.btn_transform)
+        centre_row.addWidget(self.btn_color)
 
-    def _on_saturation_changed(self, value):
-        self.lbl_sat_val.setText(str(value))
-        self.state_manager.update_setting("saturation", value)
+        layout.addLayout(centre_row)
+        layout.addStretch()
 
-    def _reset_controls(self):
-        # Reset UI controls to defaults
-        self.chk_flip_h.setChecked(False)
-        self.chk_flip_v.setChecked(False)
-        self.slider_zoom.setValue(10)
-        self.slider_bright.setValue(0)
-        self.slider_contrast.setValue(0)
-        self.slider_sat.setValue(0)
+        # ── Right: zoom pill ───────────────────────────────────────────────
+        self.zoom_pill = QFrame()
+        self.zoom_pill.setObjectName("ZoomPill")
+        self.zoom_pill.setFixedHeight(52)
+        self.zoom_pill.setStyleSheet(f"""
+            QFrame#ZoomPill {{
+                background: {CLR_GRAY_BG};
+                border-radius: 26px;
+                border: 1px solid {CLR_BORDER};
+            }}
+        """)
+        _add_shadow(self.zoom_pill, blur=20, dy=6, alpha=20)
 
-    # Core Threading Operations
+        zoom_l = QHBoxLayout(self.zoom_pill)
+        zoom_l.setContentsMargins(10, 0, 10, 0)
+        zoom_l.setSpacing(3)
+
+        btn_minus = self._pill_btn("minus.svg", "−", lambda: self._adjust_zoom(-0.1))
+        self.lbl_zoom = _label(
+            f"{self.settings.zoom_level * 100:.0f}%", 14, 600, CLR_TEXT_DARK
+        )
+        self.lbl_zoom.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_zoom.setFixedWidth(52)
+        btn_plus = self._pill_btn("plus.svg", "+", lambda: self._adjust_zoom(0.1))
+
+        zoom_l.addWidget(btn_minus)
+        zoom_l.addWidget(self.lbl_zoom)
+        zoom_l.addWidget(btn_plus)
+
+        layout.addWidget(self.zoom_pill, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def _circle_btn_style(self, size: int, bg: str = "transparent") -> str:
+        return f"""
+            QPushButton {{
+                background: {bg};
+                border: none;
+                border-radius: {size // 2}px;
+                color: {CLR_TEXT_DARK};
+                font-size: 18px;
+            }}
+            QPushButton:hover {{ background: #F3F4F6; }}
+            QPushButton:pressed {{ background: #E5E7EB; }}
+        """
+
+    def _make_icon_btn(
+        self, icon_file: str, fallback_text: str, panel: FloatingPanel
+    ) -> QPushButton:
+        btn = QPushButton()
+        btn.setFixedSize(70, 52)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {CLR_GRAY_BG};
+                border: 1px solid {CLR_BORDER};
+                border-radius: 26px;
+                color: {CLR_TEXT_DARK};
+                font-size: 22px;
+            }}
+            QPushButton:hover {{ background: #F9FAFB; }}
+            QPushButton:pressed {{ background: #F3F4F6; }}
+        """)
+
+        icon = QIcon(get_asset(icon_file))
+        if icon.isNull():
+            btn.setText(fallback_text)
+        else:
+            btn.setIcon(icon)
+            btn.setIconSize(QSize(22, 22))
+
+        _add_shadow(btn, blur=20, dy=6, alpha=20)
+        btn.clicked.connect(lambda: self._toggle_panel(panel))
+        return btn
+
+    def _pill_btn(self, icon_file: str, fallback_text: str, callback) -> QPushButton:
+        btn = QPushButton()
+        btn.setFixedSize(36, 36)
+        btn.setStyleSheet(f"""
+            QPushButton {{ 
+                background: {CLR_GRAY_BG}; 
+                border: none; 
+                border-radius: 18px; 
+                color: {CLR_TEXT_MED}; 
+                font-size: 20px; 
+                font-weight: 600; 
+                font-family: '{_FONT_FAMILY}';
+            }}
+            QPushButton:hover {{ background: #F3F4F6; color: {CLR_TEXT_DARK}; }}
+        """)
+
+        icon = QIcon(get_asset(icon_file))
+        if icon.isNull():
+            btn.setText(fallback_text)
+        else:
+            btn.setIcon(icon)
+            btn.setIconSize(QSize(18, 18))
+
+        btn.clicked.connect(callback)
+        return btn
+
+    def _position_panels(self):
+        bar_top = self.height() - self.bottom_bar.height()
+        gap = 12
+
+        self.panel_camera.adjustSize()
+        self.panel_camera.move(
+            32, bar_top - self.panel_camera.sizeHint().height() - gap
+        )
+
+        self.panel_transform.adjustSize()
+        cx = self.width() // 2
+        self.panel_transform.move(
+            cx - 80 - self.panel_transform.width() - gap // 2,
+            bar_top - self.panel_transform.sizeHint().height() - gap,
+        )
+
+        self.panel_color.adjustSize()
+        self.panel_color.move(
+            cx - 80 + 52 + gap, bar_top - self.panel_color.sizeHint().height() - gap
+        )
+
+    def _toggle_panel(self, panel: FloatingPanel):
+        self._position_panels()
+        if panel.isVisible():
+            panel.hide()
+        else:
+            panel.show()
+            panel.raise_()
+            self.bottom_bar.raise_()
+
+    def _populate_cameras(self):
+        # Clear old items in layout
+        for i in reversed(range(self.cam_list_layout.count())):
+            widget_to_remove = self.cam_list_layout.itemAt(i).widget()
+            if widget_to_remove:
+                widget_to_remove.setParent(None)
+
+        devices = []
+        if FilterGraph:
+            try:
+                devices = FilterGraph().get_input_devices()
+            except Exception:
+                pass
+
+        if not devices:
+            devices = ["Cannot detect cameras"]
+
+        # Set active label
+        current_idx = self.settings.camera_index
+        if current_idx < len(devices):
+            self.lbl_active_cam.setText(devices[current_idx])
+
+        # Generate clean buttons for each camera
+        for i, name in enumerate(devices):
+            btn = QPushButton(name)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    border: none;
+                    color: {CLR_TEXT_MED};
+                    font-family: '{_FONT_FAMILY}';
+                    font-size: 13px;
+                    text-align: left;
+                    padding: 8px 12px;
+                    border-radius: 6px;
+                }}
+                QPushButton:hover {{
+                    background: #F3F4F6;
+                    color: {CLR_TEXT_DARK};
+                }}
+            """)
+            btn.clicked.connect(
+                lambda checked, idx=i, c_name=name: self._on_camera_selected(
+                    idx, c_name
+                )
+            )
+            self.cam_list_layout.addWidget(btn)
+
+    def resizeEvent(self, event):
+        self.video_label.setGeometry(0, 0, self.width(), self.height())
+        self.bottom_bar.setGeometry(0, self.height() - 96, self.width(), 96)
+        self._position_panels()
+        if not self._cam_active:
+            self._draw_placeholder()
+        super().resizeEvent(event)
+
     def _toggle_stream(self):
         if self.engine and self.engine.isRunning():
             self._stop_engine()
-            self.btn_toggle_stream.setText("Start Virtual Camera")
-            self.btn_toggle_stream.setStyleSheet("")
-            self.preview_label.setText("Camera Stream Inactive")
         else:
-            self.btn_toggle_stream.setText("Stop Virtual Camera")
-            self.btn_toggle_stream.setStyleSheet("background-color: #E53E3E; font-weight: bold;")
             self._start_engine()
 
     def _start_engine(self):
-        self.preview_label.setText("Starting camera stream...")
+        try:
+            from src.camera_engine import CameraEngine
+        except ImportError as e:
+            import traceback
+
+            print("[StreamLens] ERROR: Failed to import CameraEngine.", file=sys.stderr)
+            print("[StreamLens] Traceback of the import failure:", file=sys.stderr)
+            traceback.print_exc()
+            print(f"[StreamLens] Reason: {e}", file=sys.stderr)
+            print("[StreamLens] Falling back to demo mode.", file=sys.stderr)
+            return
+
+        self._cam_active = True
+        self.video_label.setStyleSheet("background: #000000;")
+
+        # Set icon to ON and keep background transparent/white
+        self.btn_cam.setStyleSheet(self._circle_btn_style(40))
+        video_on_icon = QIcon(get_asset("video.svg"))
+        if not video_on_icon.isNull():
+            self.btn_cam.setIcon(video_on_icon)
+        else:
+            self.btn_cam.setText("🎥")
+
+        self.cam_pill.setStyleSheet(f"""
+            QFrame#CamPill {{
+                background: {CLR_WHITE};
+                border-radius: 26px;
+                border: 1px solid {CLR_BORDER};
+            }}
+        """)
+
         self.engine = CameraEngine(self.settings)
+        # Connect the settings changed signal to the engine's thread-safe update slot
+        self.settings_changed.connect(self.engine.update_setting, Qt.ConnectionType.DirectConnection)
         self.engine.frame_ready.connect(self._on_frame_ready)
         self.engine.error_occurred.connect(self._on_engine_error)
+        self.engine.finished.connect(self._on_engine_finished)
         self.engine.start()
 
     def _stop_engine(self):
         if self.engine:
             self.engine.stop()
-            self.engine.frame_ready.disconnect()
-            self.engine.error_occurred.disconnect()
-            self.engine = None
+
+    @pyqtSlot()
+    def _on_engine_finished(self):
+        self.engine = None
+        self._cam_active = False
+        self.video_label.setStyleSheet(f"background: {CLR_BG};")
+
+        # Revert back to OFF icon
+        self.btn_cam.setStyleSheet(self._circle_btn_style(40))
+        video_off_icon = QIcon(get_asset("video_off.svg"))
+        if not video_off_icon.isNull():
+            self.btn_cam.setIcon(video_off_icon)
+        else:
+            self.btn_cam.setText("📷")
+
+        self.cam_pill.setStyleSheet(f"""
+            QFrame#CamPill {{
+                background: {CLR_WHITE};
+                border-radius: 26px;
+                border: 1px solid {CLR_BORDER};
+            }}
+        """)
+        self._draw_placeholder()
 
     @pyqtSlot(np.ndarray)
-    def _on_frame_ready(self, frame):
-        # High performance rendering
-        # Convert BGR (OpenCV) to RGB QImage
+    def _on_frame_ready(self, frame: np.ndarray):
         h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
-        
-        # Render image and scale keeping aspect ratio
-        pixmap = QPixmap.fromImage(q_img)
-        scaled_pixmap = pixmap.scaled(
-            self.preview_container.size(), 
-            Qt.AspectRatioMode.KeepAspectRatio, 
-            Qt.TransformationMode.SmoothTransformation
+        q_img = QImage(frame.data, w, h, ch * w, QImage.Format.Format_BGR888)
+        self.video_label.setPixmap(
+            QPixmap.fromImage(q_img).scaled(
+                self.video_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         )
-        self.preview_label.setPixmap(scaled_pixmap)
 
     @pyqtSlot(str)
-    def _on_engine_error(self, error_msg):
-        print(f"Camera Engine Error: {error_msg}")
-        self.preview_label.setText(f"Error: {error_msg}")
+    def _on_engine_error(self, err: str):
+        print(f"[StreamLens] Camera error: {err}")
         self._stop_engine()
-        self.btn_toggle_stream.setText("Start Virtual Camera")
-        self.btn_toggle_stream.setStyleSheet("")
 
-    def closeEvent(self, event):
-        # Secure resource cleanup on close
-        self._stop_engine()
-        super().closeEvent(event)
+    def _on_camera_selected(self, idx: int, name: str):
+        self.lbl_active_cam.setText(name)
+        if self.state_manager:
+            self.state_manager.update_setting("camera_index", idx)
+        else:
+            self.settings.camera_index = idx
+
+        if self.engine and self.engine.isRunning():
+            self._stop_engine()
+            # The UI flow allows user to manually restart it or you can call self._start_engine() here
+
+    def _on_flip_h_changed(self):
+        new_val = not self.settings.flip_horizontal
+        if self.state_manager:
+            self.state_manager.update_setting("flip_horizontal", new_val)
+        else:
+            self.settings.flip_horizontal = new_val
+        self.settings_changed.emit("flip_horizontal", new_val)
+
+    def _on_flip_v_changed(self):
+        new_val = not self.settings.flip_vertical
+        if self.state_manager:
+            self.state_manager.update_setting("flip_vertical", new_val)
+        else:
+            self.settings.flip_vertical = new_val
+        self.settings_changed.emit("flip_vertical", new_val)
+
+    def _on_brightness_changed(self, v: int):
+        if self.state_manager:
+            self.state_manager.update_setting("brightness", v)
+        else:
+            self.settings.brightness = v
+        self.settings_changed.emit("brightness", v)
+
+    def _on_contrast_changed(self, v: int):
+        if self.state_manager:
+            self.state_manager.update_setting("contrast", v)
+        else:
+            self.settings.contrast = v
+        self.settings_changed.emit("contrast", v)
+
+    def _on_saturation_changed(self, v: int):
+        if self.state_manager:
+            self.state_manager.update_setting("saturation", v)
+        else:
+            self.settings.saturation = v
+        self.settings_changed.emit("saturation", v)
+
+    def _adjust_zoom(self, delta: float):
+        new_zoom = max(1.0, min(3.0, self.settings.zoom_level + delta))
+        if self.state_manager:
+            self.state_manager.update_setting("zoom_level", new_zoom)
+        else:
+            self.settings.zoom_level = new_zoom
+        self.lbl_zoom.setText(f"{new_zoom * 100:.0f}%")
+        self.settings_changed.emit("zoom_level", new_zoom)
+
+
+class _FallbackSettings:
+    camera_index = 0
+    flip_horizontal = True
+    flip_vertical = False
+    brightness = 0
+    contrast = 0
+    saturation = 0
+    zoom_level = 1.0
+    width = 1280
+    height = 720
+    fps = 60
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setApplicationName("Stream Lens")
+
+    # print(QFontDatabase.families())
+
+    win = StreamLensUI(state_manager=None)
+    win.show()
+    sys.exit(app.exec())

@@ -2,9 +2,9 @@ name: StreamLens CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    # branches: [ main, master ]
+  # pull_request:
+  #   branches: [ main, master ]
 
 jobs:
   test:
@@ -17,8 +17,8 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install System Dependencies (OpenCV & Qt support)
         run: |
@@ -56,8 +56,8 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install Python Dependencies
         run: |
