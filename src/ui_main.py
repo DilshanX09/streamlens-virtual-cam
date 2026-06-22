@@ -62,10 +62,8 @@ except ImportError:
 def get_asset(name: str) -> str:
     """Resolve asset path reliably for both normal run and PyInstaller EXE."""
     if hasattr(sys, "_MEIPASS"):
-        # EXE run wenakota me path eka use wenawa
         base_path = sys._MEIPASS
     else:
-        # Normal run wenakota project root eka hoyagannawa
         base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     return os.path.join(base_path, "assets", name)
