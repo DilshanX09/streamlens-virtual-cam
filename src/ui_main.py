@@ -60,8 +60,14 @@ except ImportError:
 
 
 def get_asset(name: str) -> str:
-    """Resolve asset path reliably relative to project root."""
-    base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    """Resolve asset path reliably for both normal run and PyInstaller EXE."""
+    if hasattr(sys, "_MEIPASS"):
+        # EXE run wenakota me path eka use wenawa
+        base_path = sys._MEIPASS
+    else:
+        # Normal run wenakota project root eka hoyagannawa
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
     return os.path.join(base_path, "assets", name)
 
 
@@ -223,7 +229,9 @@ def _add_shadow(widget, blur=18, dy=5, alpha=22):
 # StreamLensUI – main window
 # ===========================================================================
 class StreamLensUI(QMainWindow):
-    settings_changed = pyqtSignal(str, object)  # Emit setting key and new value thread-safely
+    settings_changed = pyqtSignal(
+        str, object
+    )  # Emit setting key and new value thread-safely
 
     def __init__(self, state_manager=None):
         super().__init__()
@@ -787,7 +795,9 @@ class StreamLensUI(QMainWindow):
 
         self.engine = CameraEngine(self.settings)
         # Connect the settings changed signal to the engine's thread-safe update slot
-        self.settings_changed.connect(self.engine.update_setting, Qt.ConnectionType.DirectConnection)
+        self.settings_changed.connect(
+            self.engine.update_setting, Qt.ConnectionType.DirectConnection
+        )
         self.engine.frame_ready.connect(self._on_frame_ready)
         self.engine.error_occurred.connect(self._on_engine_error)
         self.engine.finished.connect(self._on_engine_finished)
