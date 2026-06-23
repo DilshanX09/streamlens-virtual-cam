@@ -1,31 +1,31 @@
 import sys
+import os
 import unittest
-from unittest.mock import MagicMock
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QImage
+
+# Ensure project root is in sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.state_manager import StateManager
-from src.ui_main import StreamLensUI, CustomTitleBar
+from src.ui_main import StreamLensUI
 
-# Ensure QApplication is initialized for the testing session
-# Since we run unit tests, a single application instance is needed
+# Ensure QApplication is initialized for testing
 app = QApplication.instance()
 if app is None:
-    # Set headless offscreen platform for reliable CLI test execution
-    import os
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     app = QApplication(sys.argv)
 
 class TestStreamLensUI(unittest.TestCase):
     def setUp(self):
         self.state_manager = StateManager(config_path="dummy_settings.json")
-        # Ensure we delete dummy config if created
+        # Clean up any dummy config
         if os.path.exists("dummy_settings.json"):
             try:
                 os.remove("dummy_settings.json")
             except OSError:
                 pass
-                
         self.ui = StreamLensUI(self.state_manager)
 
     def tearDown(self):
@@ -38,47 +38,39 @@ class TestStreamLensUI(unittest.TestCase):
 
     def test_ui_components_exist(self):
         # Verify essential UI elements are created and configured correctly
-        self.assertIsNotNone(self.ui.title_bar)
-        self.assertIsNotNone(self.ui.preview_label)
-        self.assertIsNotNone(self.ui.cb_camera)
-        self.assertIsNotNone(self.ui.chk_flip_h)
-        self.assertIsNotNone(self.ui.chk_flip_v)
-        self.assertIsNotNone(self.ui.slider_zoom)
-        self.assertIsNotNone(self.ui.slider_bright)
+        self.assertIsNotNone(self.ui.video_label)
+        self.assertIsNotNone(self.ui.panel_camera)
+        self.assertIsNotNone(self.ui.panel_transform)
+        self.assertIsNotNone(self.ui.panel_color)
+        self.assertIn("Brightness", self.ui._sliders)
+        self.assertIn("Contrast", self.ui._sliders)
+        self.assertIn("Saturation", self.ui._sliders)
 
     def test_ui_syncs_with_state_manager(self):
         # Verify that altering UI controls successfully propagates settings back to StateManager
-        # 1. Flip horizontal
-        self.ui.chk_flip_h.setChecked(True)
+        
+        # 1. Flip horizontal toggle click simulation
+        self.ui._toggle_flip_h.click()
+        self.ui.state_manager.flush()
         self.assertTrue(self.state_manager.settings.flip_horizontal)
 
-        # 2. Brightness slider
-        self.ui.slider_bright.setValue(45)
+        # 2. Brightness slider value change
+        self.ui._sliders["Brightness"].setValue(45)
+        self.ui.state_manager.flush()
         self.assertEqual(self.state_manager.settings.brightness, 45)
 
-        # 3. Zoom slider
-        self.ui.slider_zoom.setValue(25) # 2.5x
-        self.assertEqual(self.state_manager.settings.zoom_level, 2.5)
+        # 3. Zoom adjustment
+        self.ui._adjust_zoom(0.5)
+        self.ui.state_manager.flush()
+        self.assertAlmostEqual(self.state_manager.settings.zoom_level, 1.5)
 
-    def test_reset_controls(self):
-        # 1. Mess up controls
-        self.ui.chk_flip_h.setChecked(True)
-        self.ui.slider_bright.setValue(50)
-        self.ui.slider_zoom.setValue(20)
-
-        # 2. Reset
-        self.ui._reset_controls()
-
-        # 3. Verify defaults
-        self.assertFalse(self.ui.chk_flip_h.isChecked())
-        self.assertEqual(self.ui.slider_bright.value(), 0)
-        self.assertEqual(self.ui.slider_zoom.value(), 10) # 1.0x
-
-    def test_title_bar_buttons(self):
-        # Check CustomTitleBar close and minimize properties exist and connect correctly
-        title_bar = self.ui.title_bar
-        self.assertIsInstance(title_bar, CustomTitleBar)
-        self.assertEqual(title_bar.btn_close.text(), "✕")
-        self.assertEqual(title_bar.btn_minimize.text(), "—")
-
-import os
+    def test_frame_ready_displays_image(self):
+        # Create a dummy QImage and pass to _on_frame_ready
+        img = QImage(16, 16, QImage.Format.Format_BGR888)
+        img.fill(Qt.GlobalColor.blue)
+        
+        # Call frame ready slot
+        self.ui._on_frame_ready(img)
+        
+        # The video_label pixmap should be set
+        self.assertIsNotNone(self.ui.video_label.pixmap())

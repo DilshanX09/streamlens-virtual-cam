@@ -45,6 +45,7 @@ class TestStateManager(unittest.TestCase):
         # Verify update_setting safely updates in-memory and saves to disk
         manager = StateManager(config_path=self.temp_file_path)
         manager.update_setting("zoom_level", 2.5)
+        manager.flush()
         self.assertEqual(manager.settings.zoom_level, 2.5)
 
         # Check raw file contents to verify write occurred
