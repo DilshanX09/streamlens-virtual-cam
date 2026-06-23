@@ -749,6 +749,10 @@ class StreamLensUI(QMainWindow):
         self.video_label.setGeometry(0, 0, self.width(), self.height())
         self.bottom_bar.setGeometry(0, self.height() - 96, self.width(), 96)
         self._position_panels()
+        if self.engine and self.engine.isRunning():
+            self.engine.update_preview_size(
+                self.video_label.width(), self.video_label.height()
+            )
         if not self._cam_active:
             self._draw_placeholder()
         super().resizeEvent(event)
@@ -792,6 +796,9 @@ class StreamLensUI(QMainWindow):
         """)
 
         self.engine = CameraEngine(self.settings)
+        self.engine.update_preview_size(
+            self.video_label.width(), self.video_label.height()
+        )
         # Connect the settings changed signal to the engine's thread-safe update slot
         self.settings_changed.connect(
             self.engine.update_setting, Qt.ConnectionType.DirectConnection
@@ -828,22 +835,22 @@ class StreamLensUI(QMainWindow):
         """)
         self._draw_placeholder()
 
-    @pyqtSlot(np.ndarray)
-    def _on_frame_ready(self, frame: np.ndarray):
-        h, w, ch = frame.shape
-        q_img = QImage(frame.data, w, h, ch * w, QImage.Format.Format_BGR888)
-        self.video_label.setPixmap(
-            QPixmap.fromImage(q_img).scaled(
-                self.video_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
+    @pyqtSlot(QImage)
+    def _on_frame_ready(self, q_img: QImage):
+        self.video_label.setPixmap(QPixmap.fromImage(q_img))
+        if self.engine:
+            self.engine.acknowledge_frame()
 
     @pyqtSlot(str)
     def _on_engine_error(self, err: str):
         print(f"[StreamLens] Camera error: {err}")
         self._stop_engine()
+
+    def closeEvent(self, event):
+        self._stop_engine()
+        if self.state_manager:
+            self.state_manager.flush()
+        super().closeEvent(event)
 
     def _on_camera_selected(self, idx: int, name: str):
         self.lbl_active_cam.setText(name)
@@ -919,8 +926,6 @@ class _FallbackSettings:
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("Stream Lens")
-
-    # print(QFontDatabase.families())
 
     win = StreamLensUI(state_manager=None)
     win.show()
