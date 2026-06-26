@@ -364,6 +364,14 @@ class StreamLensUI(QMainWindow):
 
         self._populate_cameras()
 
+        self.panel_camera.body_layout.addWidget(_divider())
+        self._toggle_fast_start = self._add_toggle_row(
+            self.panel_camera,
+            "Fast Camera Start",
+            self.settings.fast_start,
+            self._on_fast_start_changed,
+        )
+
         # ---- Transformations -----------------------------------------------
         self.panel_transform = FloatingPanel(self.central, "Transformations", width=280)
         self._toggle_flip_h = self._add_toggle_row(
@@ -777,7 +785,13 @@ class StreamLensUI(QMainWindow):
             return
 
         self._cam_active = True
-        self.video_label.setStyleSheet("background: #000000;")
+        # Show loading state while camera warms up
+        self.video_label.setPixmap(QPixmap())
+        self.video_label.setText("Starting camera...")
+        self.video_label.setStyleSheet(
+            f"background: #000000; color: {CLR_TEXT_LIGHT}; "
+            f"font-family: '{_FONT_FAMILY}'; font-size: 14px;"
+        )
 
         # Set icon to ON and keep background transparent/white
         self.btn_cam.setStyleSheet(self._circle_btn_style(40))
@@ -799,13 +813,15 @@ class StreamLensUI(QMainWindow):
         self.engine.update_preview_size(
             self.video_label.width(), self.video_label.height()
         )
-        # Connect the settings changed signal to the engine's thread-safe update slot
+        # QueuedConnection ensures the slot runs on the engine's thread,
+        # preventing UI freeze from cross-thread lock contention
         self.settings_changed.connect(
-            self.engine.update_setting, Qt.ConnectionType.DirectConnection
+            self.engine.update_setting, Qt.ConnectionType.QueuedConnection
         )
         self.engine.frame_ready.connect(self._on_frame_ready)
         self.engine.error_occurred.connect(self._on_engine_error)
         self.engine.finished.connect(self._on_engine_finished)
+        self.engine.camera_ready.connect(self._on_camera_ready)
         self.engine.start()
 
     def _stop_engine(self):
@@ -846,8 +862,16 @@ class StreamLensUI(QMainWindow):
         print(f"[StreamLens] Camera error: {err}")
         self._stop_engine()
 
+    @pyqtSlot()
+    def _on_camera_ready(self):
+        """Called when camera has finished warming up and is producing stable frames."""
+        self.video_label.setText("")
+        self.video_label.setStyleSheet("background: #000000;")
+
     def closeEvent(self, event):
-        self._stop_engine()
+        if self.engine:
+            self.engine.stop()
+            self.engine.wait(3000)  # Block on exit to ensure clean shutdown
         if self.state_manager:
             self.state_manager.flush()
         super().closeEvent(event)
@@ -862,6 +886,14 @@ class StreamLensUI(QMainWindow):
         if self.engine and self.engine.isRunning():
             self._stop_engine()
             # The UI flow allows user to manually restart it or you can call self._start_engine() here
+
+    def _on_fast_start_changed(self):
+        new_val = not self.settings.fast_start
+        if self.state_manager:
+            self.state_manager.update_setting("fast_start", new_val)
+        else:
+            self.settings.fast_start = new_val
+        self.settings_changed.emit("fast_start", new_val)
 
     def _on_flip_h_changed(self):
         new_val = not self.settings.flip_horizontal
@@ -921,6 +953,7 @@ class _FallbackSettings:
     width = 1280
     height = 720
     fps = 60
+    fast_start = True
 
 
 if __name__ == "__main__":

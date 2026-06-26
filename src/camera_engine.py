@@ -11,6 +11,11 @@ from src.state_manager import AppSettings
 class CameraEngine(QThread):
     frame_ready = pyqtSignal(QImage)
     error_occurred = pyqtSignal(str)
+    camera_ready = pyqtSignal()  # Emitted after camera is warmed up and stable
+
+    # Number of warm-up frames to discard on camera open.
+    # These initial frames are often black/corrupted while AE/AF settles.
+    WARMUP_FRAMES = 10
 
     def __init__(self, settings: AppSettings):
         super().__init__()
@@ -59,36 +64,107 @@ class CameraEngine(QThread):
         with self.lock:
             self.ui_ready = True
 
+    def _init_camera(self, camera_index: int, width: int, height: int):
+        """
+        Initialize camera with settings optimized to prevent auto-exposure
+        hunting (flash blink) and minimize startup latency.
+
+        Returns an opened VideoCapture or None on failure.
+        """
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            return None
+
+        # 1. Force MJPG codec for maximum quality & faster decode from hardware
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
+        # 2. Set resolution
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+        # 3. Minimize internal frame buffer to prevent stale frames on start
+        #    (default is often 4+ frames, causing perceived startup lag)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # 4. Suppress auto-exposure hunting that causes flash/LED blinking.
+        #    DirectShow convention: 0.25 = manual exposure, 0.75 = auto.
+        #    This is best-effort — not all cameras/drivers support it.
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        cap.set(cv2.CAP_PROP_EXPOSURE, -5)
+
+        # 5. Disable autofocus to prevent mechanical hunting delays
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+
+        # NOTE: We deliberately do NOT set CAP_PROP_FPS via DirectShow.
+        # Setting FPS triggers a full camera pipeline re-negotiation which
+        # causes additional auto-exposure/flash blinks and adds 1-2s startup
+        # delay. Frame pacing is instead handled by pyvirtualcam's
+        # sleep_until_next_frame().
+
+        return cap
+
+    def _warmup_camera(self, cap, num_frames: int = None):
+        """
+        Discard initial frames that are typically black or have unstable
+        exposure/white-balance. Uses grab() instead of read() for speed
+        since we don't need to decode these frames.
+        """
+        if num_frames is None:
+            num_frames = self.WARMUP_FRAMES
+        for _ in range(num_frames):
+            if not self._run_flag:
+                break
+            cap.grab()
+
+    def _restore_auto_exposure(self, cap):
+        """
+        Re-enable auto-exposure after warm-up so the camera adapts to
+        changing lighting conditions during normal operation.
+        """
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+
     def run(self):
         try:
-            # Check run flag before initializing
+            # Snapshot settings under lock before slow hardware init
             with self.lock:
                 if not self._run_flag:
                     return
-                # Hardware Initialization
-                self.cap = cv2.VideoCapture(self.settings.camera_index, cv2.CAP_DSHOW)
-                curr_w = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                curr_h = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                curr_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                camera_index = self.settings.camera_index
+                width = self.settings.width
+                height = self.settings.height
+                fps = self.settings.fps
 
-                if curr_w != self.settings.width:
-                    self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.width)
-                if curr_h != self.settings.height:
-                    self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.height)
-                if curr_fps != self.settings.fps:
-                    self.cap.set(cv2.CAP_PROP_FPS, self.settings.fps)
-
-            if not self.cap.isOpened():
+            # --- Hardware Initialization (outside lock — this is slow I/O) ---
+            cap = self._init_camera(camera_index, width, height)
+            if cap is None:
                 self.error_occurred.emit(
-                    f"Could not open camera {self.settings.camera_index}"
+                    f"Could not open camera {camera_index}"
                 )
                 return
 
-            # Virtual Camera Initialization: Use defaults to safely pick up available driver (OBS, etc.)
+            with self.lock:
+                if not self._run_flag:
+                    cap.release()
+                    return
+                self.cap = cap
+
+            # Discard warm-up frames (black/unstable exposure)
+            self._warmup_camera(cap)
+
+            if not self._run_flag:
+                return
+
+            # Re-enable auto-exposure now that initial frames are stable
+            self._restore_auto_exposure(cap)
+
+            # Notify UI that camera is ready and streaming
+            self.camera_ready.emit()
+
+            # --- Virtual Camera Initialization ---
             with pyvirtualcam.Camera(
-                width=self.settings.width,
-                height=self.settings.height,
-                fps=self.settings.fps,
+                width=width,
+                height=height,
+                fps=fps,
             ) as cam:
                 print(f"Virtual Camera Active: {cam.device}")
 
@@ -112,11 +188,11 @@ class CameraEngine(QThread):
                         reconnected = False
                         while self._run_flag and not reconnected:
                             # Send a black placeholder frame to virtual camera to keep connection active
-                            placeholder = np.zeros((self.settings.height, self.settings.width, 3), dtype=np.uint8)
+                            placeholder = np.zeros((height, width, 3), dtype=np.uint8)
                             cv2.putText(
                                 placeholder,
                                 "Camera Disconnected - Retrying...",
-                                (50, self.settings.height // 2),
+                                (50, height // 2),
                                 cv2.FONT_HERSHEY_SIMPLEX,
                                 0.8,
                                 (255, 255, 255),
@@ -136,25 +212,15 @@ class CameraEngine(QThread):
                                 break
 
                             print("[CameraEngine] Attempting reconnection...")
-                            new_cap = cv2.VideoCapture(self.settings.camera_index, cv2.CAP_DSHOW)
-                            curr_w = new_cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                            curr_h = new_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                            curr_fps = new_cap.get(cv2.CAP_PROP_FPS)
+                            new_cap = self._init_camera(camera_index, width, height)
 
-                            if curr_w != self.settings.width:
-                                new_cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.width)
-                            if curr_h != self.settings.height:
-                                new_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.height)
-                            if curr_fps != self.settings.fps:
-                                new_cap.set(cv2.CAP_PROP_FPS, self.settings.fps)
-
-                            if new_cap.isOpened():
+                            if new_cap is not None:
+                                self._warmup_camera(new_cap, num_frames=5)
+                                self._restore_auto_exposure(new_cap)
                                 with self.lock:
                                     self.cap = new_cap
                                 reconnected = True
                                 print("[CameraEngine] Reconnection successful!")
-                            else:
-                                new_cap.release()
 
                         if not reconnected:
                             break
@@ -163,12 +229,14 @@ class CameraEngine(QThread):
                     # 1. Processing Pipeline (In-place optimizations applied inside)
                     processed_frame = self._process_frame(frame)
 
-                    # 2. Resolution Safety Check and Correction
+                    # 2. Resolution Safety Check — high quality interpolation
                     h, w = processed_frame.shape[:2]
-                    target_w, target_h = self.settings.width, self.settings.height
+                    target_w, target_h = width, height
                     if w != target_w or h != target_h:
+                        # INTER_AREA for downscaling (anti-aliased), INTER_LANCZOS4 for upscaling
+                        interp = cv2.INTER_AREA if (w > target_w or h > target_h) else cv2.INTER_LANCZOS4
                         processed_frame = cv2.resize(
-                            processed_frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR
+                            processed_frame, (target_w, target_h), interpolation=interp
                         )
 
                     # 3. Virtual Camera Output (Optimized buffer reuse)
@@ -188,8 +256,9 @@ class CameraEngine(QThread):
                             self.ui_ready = False
 
                         # Scale on background thread to offload UI thread
+                        # INTER_AREA produces smooth downscaled previews
                         preview_frame = cv2.resize(
-                            processed_frame, preview_size, interpolation=cv2.INTER_LINEAR
+                            processed_frame, preview_size, interpolation=cv2.INTER_AREA
                         )
                         ph, pw, pch = preview_frame.shape
                         q_img = QImage(
@@ -230,7 +299,8 @@ class CameraEngine(QThread):
             start_h = (h - new_h) // 2
             start_w = (w - new_w) // 2
             frame = frame[start_h : start_h + new_h, start_w : start_w + new_w]
-            frame = cv2.resize(frame, self.output_size, interpolation=cv2.INTER_LINEAR)
+            # INTER_LANCZOS4 for high quality zoom output
+            frame = cv2.resize(frame, self.output_size, interpolation=cv2.INTER_LANCZOS4)
 
         # 2. Flips (In-place)
         if flip_horizontal and flip_vertical:
@@ -255,11 +325,15 @@ class CameraEngine(QThread):
         return frame
 
     def stop(self):
+        """Signal the engine to stop. Releases camera to unblock any pending read().
+        
+        This method is non-blocking — it signals the thread to stop and releases
+        the camera device, but does NOT wait for the thread to finish. Use wait()
+        after calling stop() if you need to block until the thread exits (e.g. on
+        application close).
+        """
         self._run_flag = False
         with self.lock:
             if self.cap:
                 self.cap.release()
-                # Do not set to None here to prevent None reference errors in run loop
-                # since we check cap_device = self.cap, but it will exit loop when read fails
-        self.wait(2000)  # Wait up to 2 seconds for worker thread to exit securely
-
+                self.cap = None
